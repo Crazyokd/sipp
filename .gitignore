@@ -1,0 +1,6 @@
+compile_commands.json
+*.d
+*.so
+*.a
+*.o
+sipp-example
