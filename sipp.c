@@ -251,7 +251,19 @@ int parse(sip_t *sip)
                 sip->req.method = SIP_PRACK; /* or PUBLISH */
                 break;
             case 'R':
-                sip->req.method = SIP_REFER; /* or REGISTER */
+                if (idx + 2 >= len || data[idx + 1] != 'E') {
+                    goto error;
+                }
+                switch (data[idx + 2]) {
+                case 'F':
+                    sip->req.method = SIP_REFER;
+                    break;
+                case 'G':
+                    sip->req.method = SIP_REGISTER;
+                    break;
+                default:
+                    goto error;
+                }
                 break;
             case 'S':
                 sip->req.method = SIP_SUBSCRIBE;

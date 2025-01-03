@@ -1506,7 +1506,7 @@ int main()
     sip.settings = &settings;
     set_default_cbs(&settings);
 
-/*
+    /*
     add_hdr_cb("to", just_print_header, sip.settings);
     add_hdr_cb("from", just_print_header, sip.settings);
     add_hdr_cb("contact", just_print_header, sip.settings);
@@ -1524,7 +1524,7 @@ int main()
     add_hdr_cb("via", just_print_header, sip.settings);
     add_hdr_cb("user-agent", just_print_header, sip.settings);
     add_hdr_cb("content-length", assign_content_length, sip.settings);
-*/
+    */
 
     parse(&sip);
 
