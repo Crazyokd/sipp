@@ -126,59 +126,65 @@ static const char *cpt2long_map[26] = {
     "via", /* v */
 };
 
-static header_cb find_header_callback(const char *field, uint32_t len,
-                                      sip_settings_t *settings)
+/**
+ * try to find header callback
+ * @param
+ *  clen: the consumed length
+ * @return
+ */
+static inline header_cb find_header_callback(uint8_t *field, int len,
+                                             sip_settings_t *settings,
+                                             int *clen)
 {
-    // here's len must greater than 0
-    header_cb_list *list = settings->header_cbs[len];
-    while (list) {
-        uint32_t i = 0;
-        for (i = 0; i < len && tolower(list->field[i]) == tolower(field[i]);
-             i++) {
-            continue;
-        }
-        if (i == len) {
-            // find it!
-            return list->callback;
-        }
-        list = list->next;
+    node_t *next = &settings->root, *pre = NULL;
+    int idx = 0;
+    *clen = 0;
+    while (idx < len && field[idx] != ':' && next) {
+        pre = next;
+        next = pre->childs[tolower(field[idx]) - 'a'];
+        // if (next) printf("%d:%c;", idx, *next->ch);
+        ++idx;
     }
+    // printf("idx=%d\n", idx);
+    *clen = idx;
+    if (idx >= len) {
+        // ie. field[idx-1] != ':', error
+        return NULL;
+    }
+    if (field[idx] == ':') {
+        if (next) {
+            return next->cb;
+        } else {
+            // 回溯
+        }
+    }
+    // 回溯
+    if (pre->len > 0) {
+        // 值得回溯
+        idx -= 1;
+        uint32_t i;
+        for (i = 1; i <= pre->len && idx < len && field[idx] != ':'
+                    && tolower(field[idx]) == pre->ch[i];
+             i++, idx++) {}
+        *clen = idx;
+        if (i > pre->len && field[idx] == ':') {
+            return pre->cb;
+        }
+    }
+    // 未注册相应回调
     return NULL;
 }
 
-static void global_header_callback(str_t *field, str_t *value,
-                                   sip_settings_t *settings, headers_t *headers)
+static inline void global_header_callback(str_t *field, str_t *value,
+                                          header_cb hdr_cb, headers_t *headers)
 {
-    if (field->len <= 0) {
-        return;
-    }
-    // check whether the header field is compact form and try to convert it to long form
-    const char *long_format = NULL;
-    uint32_t len = 0;
-    if (field->len == 1) {
-        // note: is compact format always lowercase?
-        if (field->start[0] < 'a' || field->start[0] > 'z') {
-            printf("weired compact header %.*s\n", field->len, field->start);
-            return;
-        }
-        long_format = cpt2long_map[field->start[0] - 'a'];
-        if (!long_format) {
-            printf("weired compact header %.*s\n", field->len, field->start);
-            return;
-        }
-        len = strlen(long_format);
-    } else {
-        long_format = field->start;
-        len = field->len;
-    }
-    // find corresponding callback
-    header_cb hdr_cb = find_header_callback(long_format, len, settings);
     if (hdr_cb)
         hdr_cb(field, value, headers);
     else {
         printf("warning: no suitable callback for (%.*s: %.*s) found\n",
                field->len, field->start, value->len, value->start);
     }
+    hdr_cb = NULL;
 }
 
 int parse(sip_t *sip)
@@ -187,6 +193,7 @@ int parse(sip_t *sip)
     uint32_t len = sip->len;
     state_e state = start_req_or_res; // set init
     str_t hdr_field, hdr_value;
+    header_cb hdr_cb = NULL;
     int left, right;
 
     for (uint32_t idx = 0; idx < len; idx++) {
@@ -477,20 +484,24 @@ int parse(sip_t *sip)
         }
         case header_field: { // really header field
             // get the end of header field
-            while (idx + 1 < len && tokens[data[idx + 1]]) {
+            int clen;
+            hdr_cb = find_header_callback(data + idx, len - idx, sip->settings,
+                                          &clen);
+            // printf("header: %.*s\n", clen, data + idx);
+            idx += clen; // the clen >= 1
+            while (idx < len && tokens[data[idx]]) {
                 idx++;
             }
             right = idx; // exclude ':'
 
-            if (idx + 1 == len) {
+            if (idx == len) {
                 // header field too long
                 goto error;
             }
-            idx++;
             if (data[idx] == ':') {
                 // record header field
                 hdr_field.start = (char *)data + left;
-                hdr_field.len = right - left + 1;
+                hdr_field.len = right - left;
                 // update state
                 state = header_value_discard_ws;
                 break;
@@ -557,7 +568,7 @@ int parse(sip_t *sip)
             hdr_value.len = 0;
             // TODO: determine header state
             // now we can trigger callback
-            global_header_callback(&hdr_field, &hdr_value, sip->settings,
+            global_header_callback(&hdr_field, &hdr_value, hdr_cb,
                                    &sip->headers);
             state = header_field_start;
             break;
@@ -571,7 +582,7 @@ int parse(sip_t *sip)
             hdr_value.len = right - left + 1;
             // TODO: determine header state
             // now we can trigger callback
-            global_header_callback(&hdr_field, &hdr_value, sip->settings,
+            global_header_callback(&hdr_field, &hdr_value, hdr_cb,
                                    &sip->headers);
             state = header_field_start;
             break;
@@ -618,19 +629,50 @@ error:
     return -1;
 }
 
-static inline int prepend_hdr_cb(const char *field, int len, header_cb cb,
-                                 sip_settings_t *settings)
+static inline int add_node(node_t *node, const char *ch, int len, header_cb cb1,
+                           header_cb cb2)
 {
-    header_cb_list *new_list = malloc(sizeof(header_cb_list));
-    if (!new_list) {
+    node_t *nn = calloc(1, sizeof(node_t));
+    if (!nn) {
         return -1;
     }
 
-    // TODO: Is field always need memcpy?
-    new_list->field = field;
-    new_list->callback = cb;
-    new_list->next = settings->header_cbs[len];
-    settings->header_cbs[len] = new_list;
+    nn->ch = ch;
+    nn->len = len;
+    nn->cb = cb1;
+    node->cb = cb2;
+    node->childs[*ch - 'a'] = nn;
+
+    return 0;
+}
+
+static inline int extend_tree(node_t *node, const char *s2, int len2,
+                              header_cb cb2)
+{
+    const char *s1 = node->ch + 1;
+    int len1 = node->len;
+    node->len = 0;
+    int idx1 = 0, idx2 = 0;
+    header_cb cb1 = node->cb;
+    node->cb = NULL;
+    while (len1 > idx1 && len2 > idx2 && s1[idx1] == s2[idx2]) {
+        node_t *nn = calloc(1, sizeof(node_t));
+        if (!nn) {
+            return -1;
+        }
+        nn->ch = s1 + idx1;
+        nn->len = 0;
+        nn->cb = NULL;
+        node->childs[s1[idx1] - 'a'] = nn;
+        node = nn;
+
+        idx1++;
+        idx2++;
+    }
+
+    if (len1 > idx1) add_node(node, s1 + idx1, len1 - idx1 - 1, cb1, cb2);
+    if (len2 > idx2) add_node(node, s2 + idx2, len2 - idx2 - 1, cb2, cb1);
+
     return 0;
 }
 
@@ -643,39 +685,59 @@ static inline int prepend_hdr_cb(const char *field, int len, header_cb cb,
  */
 int add_hdr_cb(const char *field, header_cb cb, sip_settings_t *settings)
 {
-    if (!field || !cb || !settings) {
-        return -1;
-    }
-    int len = strlen(field);
-    if (len == 0) {
-        return -1;
-    }
-    // find whether the field already exists
-    header_cb_list *list = settings->header_cbs[len];
-    while (list) {
-        int i = 0;
-        for (; i < len && tolower(list->field[i]) == tolower(field[i]); i++) {
-            continue;
+    uint32_t idx = 0, len = strlen(field);
+    node_t *pre = &settings->root;
+    while (idx < len) {
+        int child_idx = tolower(field[idx]) - 'a';
+        node_t *node = pre->childs[child_idx];
+        if (!node) {
+            // 想匹配的节点尚不存在
+            if (pre->len > 0) {
+                // 当前节点还可以再度扩展
+                if (pre->len == (len - idx)
+                    && strncmp(pre->ch + 1, field + idx, pre->len) == 0) {
+                    // 当前节点与待插入节点完全相同，仅更新callback
+                    pre->cb = cb;
+                } else {
+                    // 延展该节点
+                    extend_tree(pre, field + idx, len - idx, cb);
+                }
+            } else {
+                // 当前节点不是叶子节点，新建节点即可
+                node_t *nn = calloc(1, sizeof(node_t)); // nn: new node
+                if (!nn) {
+                    return -1;
+                }
+                nn->cb = cb;
+                nn->ch = field + idx;
+                nn->len = len - idx - 1;
+                pre->childs[child_idx] = nn;
+            }
+            break;
+        } else {
+            pre = node;
         }
-        if (i == len) {
-            // find it! now we can update the callback
-            list->callback = cb;
-            return 1;
-        }
-        list = list->next;
+        ++idx;
     }
 
-    return prepend_hdr_cb(field, len, cb, settings);
+    return 0;
+}
+
+static inline void free_nodes(node_t *root)
+{
+    for (int i = 0; i < MAX_HEADER_LEN; i++) {
+        if (root->childs[i]) {
+            free_nodes(root->childs[i]);
+        }
+    }
+    free(root);
 }
 
 void release_hdr_cbs(sip_settings_t *settings)
 {
     for (int i = 0; i < MAX_HEADER_LEN; i++) {
-        header_cb_list *list = settings->header_cbs[i];
-        while (list) {
-            header_cb_list *next = list->next;
-            free(list);
-            list = next;
+        if (settings->root.childs[i]) {
+            free_nodes(settings->root.childs[i]);
         }
     }
 }
@@ -757,36 +819,41 @@ int set_default_cbs(sip_settings_t *settings)
     }
 
     int ret = 0;
-    ret += 0 ^ prepend_hdr_cb("to", 2, default_to_cb, settings);
-    ret += 0 ^ prepend_hdr_cb("from", 4, default_from_cb, settings);
-    ret += 0 ^ prepend_hdr_cb("contact", 7, default_contact_cb, settings);
-    ret += 0 ^ prepend_hdr_cb("expires", 7, default_expires_cb, settings);
-    ret += 0
-         ^ prepend_hdr_cb("p-access-network-info", 21,
-                          default_p_access_network_info_cb, settings);
-    ret += 0 ^ prepend_hdr_cb("supported", 9, default_supported_cb, settings);
-    ret += 0 ^ prepend_hdr_cb("allow", 5, default_allow_cb, settings);
-    ret += 0 ^ prepend_hdr_cb("require", 7, default_require_cb, settings);
-    ret += 0
-         ^ prepend_hdr_cb("proxy-require", 13, default_proxy_require_cb,
-                          settings);
-    ret += 0
-         ^ prepend_hdr_cb("security-client", 15, default_security_client_cb,
-                          settings);
-    ret += 0
-         ^ prepend_hdr_cb("authorization", 13, default_authorization_cb,
-                          settings);
-    ret += 0 ^ prepend_hdr_cb("call-id", 7, default_call_id_cb, settings);
-    ret += 0 ^ prepend_hdr_cb("cseq", 4, default_cseq_cb, settings);
+    // add callback of compact format header
+    ret += 0 ^ add_hdr_cb(cpt2long_map['f' - 'a'], default_from_cb, settings);
     ret +=
-        0
-        ^ prepend_hdr_cb("max-forwards", 12, default_max_forwards_cb, settings);
-    ret += 0 ^ prepend_hdr_cb("via", 3, default_via_cb, settings);
+        0 ^ add_hdr_cb(cpt2long_map['i' - 'a'], default_call_id_cb, settings);
     ret +=
-        0 ^ prepend_hdr_cb("user-agent", 10, default_user_agent_cb, settings);
+        0 ^ add_hdr_cb(cpt2long_map['k' - 'a'], default_supported_cb, settings);
     ret += 0
-         ^ prepend_hdr_cb("content-length", 14, default_content_length_cb,
-                          settings);
+         ^ add_hdr_cb(cpt2long_map['l' - 'a'], default_content_length_cb,
+                      settings);
+    ret +=
+        0 ^ add_hdr_cb(cpt2long_map['m' - 'a'], default_contact_cb, settings);
+    ret += 0 ^ add_hdr_cb(cpt2long_map['t' - 'a'], default_to_cb, settings);
+    ret += 0 ^ add_hdr_cb(cpt2long_map['v' - 'a'], default_via_cb, settings);
+
+    ret += 0 ^ add_hdr_cb("to", default_to_cb, settings);
+    ret += 0 ^ add_hdr_cb("from", default_from_cb, settings);
+    ret += 0 ^ add_hdr_cb("contact", default_contact_cb, settings);
+    ret += 0 ^ add_hdr_cb("expires", default_expires_cb, settings);
+    ret += 0
+         ^ add_hdr_cb("p-access-network-info", default_p_access_network_info_cb,
+                      settings);
+    ret += 0 ^ add_hdr_cb("supported", default_supported_cb, settings);
+    ret += 0 ^ add_hdr_cb("allow", default_allow_cb, settings);
+    ret += 0 ^ add_hdr_cb("require", default_require_cb, settings);
+    ret += 0 ^ add_hdr_cb("proxy-require", default_proxy_require_cb, settings);
+    ret +=
+        0 ^ add_hdr_cb("security-client", default_security_client_cb, settings);
+    ret += 0 ^ add_hdr_cb("authorization", default_authorization_cb, settings);
+    ret += 0 ^ add_hdr_cb("call-id", default_call_id_cb, settings);
+    ret += 0 ^ add_hdr_cb("cseq", default_cseq_cb, settings);
+    ret += 0 ^ add_hdr_cb("max-forwards", default_max_forwards_cb, settings);
+    ret += 0 ^ add_hdr_cb("via", default_via_cb, settings);
+    ret += 0 ^ add_hdr_cb("user-agent", default_user_agent_cb, settings);
+    ret +=
+        0 ^ add_hdr_cb("content-length", default_content_length_cb, settings);
     return ret;
 }
 

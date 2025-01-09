@@ -39,15 +39,16 @@ typedef struct headers_s {
 
 typedef int (*header_cb)(str_t *field, str_t *value, headers_t *headers);
 
-typedef struct header_cb_list_s {
-    const char *field;
-    header_cb callback;
-    struct header_cb_list_s *next;
-} header_cb_list;
-
 #define MAX_HEADER_LEN 32
+typedef struct node_s {
+    const char *ch;
+    uint32_t len; // from ch+1
+    header_cb cb;
+    struct node_s* childs[MAX_HEADER_LEN];
+} node_t;
+
 typedef struct sip_settings_s {
-    header_cb_list *header_cbs[MAX_HEADER_LEN];
+    node_t root;
 } sip_settings_t;
 
 typedef enum {
